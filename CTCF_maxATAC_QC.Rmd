@@ -1,0 +1,219 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(GenomicRanges)
+library(data.table)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+codex_dir="/Users/javrodher/Work/biodata/LOLA/nm/t1/resources/regions/LOLACore/hg38/codex/regions/"
+encode_dir="/Users/javrodher/Work/biodata/LOLA/nm/t1/resources/regions/LOLACore/hg38/encode_tfbs/regions/"
+
+outdir="/Users/javrodher/Work/RStudio-PRJs/TCGA_PanCan/results/"
+
+```
+
+```{r}
+f_codex=list.files(codex_dir,pattern = "CTCF")
+f_encode=list.files(encode_dir,pattern = "Ctcf")
+index_codex_file="/Users/javrodher/Work/biodata/LOLA/nm/t1/resources/regions/LOLACore/hg38/codex/index.txt"
+index_encode_file="/Users/javrodher/Work/biodata/LOLA/nm/t1/resources/regions/LOLACore/hg38/encode_tfbs/index.txt"
+
+index_codex=read.delim(index_codex_file)
+index_encode=read.delim(index_encode_file)
+
+index_codex_ctcf = index_codex[index_codex$antibody=="CTCF",]
+index_encode_ctcf = index_encode[index_encode$antibody=="CTCF",]
+
+index_codex_ctcf$mappingGenome
+index_encode_ctcf=index_encode_ctcf[index_encode_ctcf$treatment=="None",]
+table(index_encode_ctcf$cellType)
+
+fnames=index_encode_ctcf$filename
+
+X=data.frame(V1=NA,V2=NA,V3=NA,V4=NA,stringsAsFactors = F)
+for (fname in fnames){
+  #fname=fnames[1]
+  
+  print(fname)
+  x = read.delim(paste0(encode_dir,"/",fname),header = F)
+  x$V4=fname
+  X=rbind(X,x)
+}
+
+X=X[-1,]
+table(X$V4)
+
+write.table(X[,1:3],paste0(outdir,"/","ctcf_encode_LOLA_hg38.bed"),quote = F,sep="\t",col.names = F,row.names = F)
+```
+
+```{r}
+# sort -k1,1 -k2,2n ctcf_encode_LOLA_hg38.bed > ctcf_encode_sorted.bed
+# bedtools merge -i ctcf_encode_sorted.bed > ctcf_encode_merged.bed
+# wc -l ctcf_encode_merged.bed
+```
+
+```{r}
+inpdir="/Users/javrodher/Work/RStudio-PRJs/TCGA_PanCan/data/maxATAC/CTCF/"
+top_list=c("all",100000,90000,80000,70000,60000,50000,40000,30000,20000,10000)
+
+ctcf_peaks = read.delim(paste0(outdir,"/ctcf_encode_merged.bed"),header = F)
+names(ctcf_peaks)=c("chr","start","end")
+#quantile(ctcf_peaks$end-ctcf_peaks$start)
+samples=list.dirs(inpdir,full.names = F,recursive = F)
+
+X=data.frame(V1=NA,V2=NA,V3=NA,V4=NA,V5=NA,V6=NA,stringsAsFactors = F)
+for (sample in samples){
+  #sample=samples[1]
+  print(sample)
+  x=read.delim(paste0(inpdir,"/",sample,"/maxatac_predict_32bp.bed"),header = F)
+  x=x[order(x$V4,decreasing = T),]
+  x$V5=sample
+  x$V6=1:nrow(x)
+  X=rbind(X,x)
+}
+
+fx1 = function(sample,inpdir){
+  #sample=samples[1]
+  #print(sample)
+  x=read.delim(paste0(inpdir,"/",sample,"/maxatac_predict_32bp.bed"),header = F)
+  x=x[order(x$V4,decreasing = T),]
+  x$V5=sample
+  x$V6=1:nrow(x)
+  return(x)
+}
+
+res = parallel::mclapply(samples,fx1,inpdir=inpdir,mc.cores = 5)
+predicted_ctcf=do.call(rbind.data.frame,res)
+names(predicted_ctcf)=c("chr","start","end","score","sample","rank")
+table(predicted_ctcf$sample)
+predicted_ctcf$celltype=substring(predicted_ctcf$sample,1,4)
+
+#table(predicted_ctcf$sample)
+#fwrite(predicted_ctcf,paste0(outdir,"/","predicted_ctcf_allSamples.csv"),row.names=F)
+predicted_ctcf = fread(paste0(outdir,"/","predicted_ctcf_allSamples.csv"))
+
+ctcf_peaks_lola.gr=makeGRangesFromDataFrame(ctcf_peaks,keep.extra.columns = T)
+
+DF=data.frame(sample=NA,tps=NA,fps=NA,n_peaks=NA,frac_tps=NA,top=NA,stringsAsFactors = F)
+for (top in top_list){
+  #top="all"
+  print(top)
+  
+  if(top != "all") { 
+    predicted=predicted_ctcf[predicted_ctcf$rank %in% 1:top,] 
+    } else {predicted = predicted_ctcf }
+  predicted.gr=makeGRangesFromDataFrame(predicted,keep.extra.columns = T)
+  ovl=as.data.frame(findOverlaps(predicted.gr,ctcf_peaks_lola.gr))
+  predicted$overlap_lola=F
+  predicted$overlap_lola[unique(ovl$queryHits)]=T
+  #table(predicted$overlap_lola)
+
+  tps = as.data.frame(table(predicted$sample[predicted$overlap_lola==T]))
+  fps = as.data.frame(table(predicted$sample[predicted$overlap_lola==F]))
+  df=data.frame(sample=tps$Var1,tps=tps$Freq,fps=fps$Freq,stringsAsFactors = F)
+  df$n_peaks=df$tps+df$fps
+  df$frac_tps=df$tps/df$n_peaks
+  df$top=top
+  DF=rbind(DF,df)
+}  
+  DF=DF[-1,]
+  DF$celltype=substring(DF$sample, 1, 4)
+  table(DF$celltype)
+  fwrite(DF,paste0(outdir,"/","predicted_ctcf_stats.csv"),row.names=F)
+  DF$top=as.factor(DF$top)
+  library(gridGraphics)
+  
+  DF$top=factor(DF$top,levels=c("all",seq(100000,10000,-10000)))
+
+  ggplot(DF,aes(x=frac_tps))+
+    geom_histogram()+
+    facet_wrap(~top)+
+    theme_bw()+
+    geom_vline(xintercept = 0.4,color="red")
+```
+
+```{r}
+ggplot(predicted_ctcf,aes(x=sample,y=score))+
+         geom_boxplot()+
+         facet_wrap(~celltype,scales = "free_x",ncol = 1)+
+         theme(axis.text.x = element_blank())+
+         ylab("Peak score")+
+         xlab("Samples")
+```
+
+
+```{r}
+df_score = predicted_ctcf %>% group_by(sample) %>% summarise(median_score=median(score))
+df_score$celltype=substring(df_score$sample, 1, 4)
+
+ggplot(df_score,aes(x=sample,y=median_score))+
+         geom_col()+
+  facet_wrap(~celltype,scales = "free_x")+
+  theme_bw()+
+    theme(axis.text.x = element_blank())+
+    ylab("Peak score (Median)")+
+    xlab("Samples")
+
+```
+
+```{r}
+ ggplot(DF,aes(x=top,y=frac_tps))+
+    geom_boxplot()+
+    theme_bw()
+```
+
+```{r}
+ ggplot(DF,aes(x=top,y=frac_tps))+
+    geom_boxplot()+
+    facet_wrap(~celltype)+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle=90, hjust=1))+
+    ylab("True positives (fraction)")+
+    xlab("Peak number")
+
+```
+
+```{r}
+DF[DF$top=="all",] %>% group_by(celltype) %>% summarise(n=n())
+```
+
+```{r}
+ggplot(DF[DF$top=="all",],aes(x=celltype,y=n_peaks))+
+    geom_boxplot()
+
+ggplot(DF[DF$top=="all",],aes(x=sample,y=n_peaks))+
+    geom_col()+
+  facet_wrap(~celltype,scales = "free_x")+
+    theme_bw()+
+    theme(axis.text.x = element_blank())+
+    ylab("Predicted CTCF peaks (count)")+
+    xlab("Samples")
+```
+
+
+
+
+
+```{r}
+# number of predicted peaks per cancer type 
+# number of tps per cancer type per top selection
+# scores of predicted peaks per cancer type
+```
+
+```{r}
+x=as.data.frame(table(predicted_ctcf$sample))
+quantile(x$Freq)
+hist(x$Freq,breaks = 50)
+quantile(predicted_ctcf$score[!is.na(predicted_ctcf$score)],na.rm=F)
+```
+
+```{r}
+ggplot(predicted_ctcf[predicted_ctcf$sample %in% samples[1:20],],aes(x=score))+
+  geom_histogram()+
+  facet_wrap(~sample)
+```
+
